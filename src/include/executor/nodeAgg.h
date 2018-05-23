@@ -16,6 +16,7 @@
 
 #include "access/parallel.h"
 #include "nodes/execnodes.h"
+#include "executor/execProgram.h"
 
 
 /*
@@ -337,5 +338,22 @@ extern void ExecAggEstimate(AggState *node, ParallelContext *pcxt);
 extern void ExecAggInitializeDSM(AggState *node, ParallelContext *pcxt);
 extern void ExecAggInitializeWorker(AggState *node, ParallelWorkerContext *pwcxt);
 extern void ExecAggRetrieveInstrumentation(AggState *node);
+
+
+extern void agg_fill_hash_table_onetup(AggState *aggstate, TupleTableSlot *slot);
+extern TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
+
+
+typedef enum AggStateBoundaryState
+{
+	AGGBOUNDARY_NEXT,
+	AGGBOUNDARY_REACHED,
+	AGGBOUNDARY_FINISHED
+} AggStateBoundaryState;
+
+extern AggStateBoundaryState agg_fill_direct_onetup(AggState *aggstate, TupleTableSlot *slot);
+
+
+extern void ExecProgramBuildForAgg(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d);
 
 #endif							/* NODEAGG_H */

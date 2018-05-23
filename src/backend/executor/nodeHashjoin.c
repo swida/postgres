@@ -174,21 +174,6 @@
 #include "utils/sharedtuplestore.h"
 
 
-/*
- * States of the ExecHashJoin state machine
- */
-#define HJ_BUILD_HASHTABLE		1
-#define HJ_NEED_NEW_OUTER		2
-#define HJ_SCAN_BUCKET			3
-#define HJ_FILL_OUTER_TUPLE		4
-#define HJ_FILL_INNER_TUPLES	5
-#define HJ_NEED_NEW_BATCH		6
-
-/* Returns true if doing null-fill on outer relation */
-#define HJ_FILL_OUTER(hjstate)	((hjstate)->hj_NullInnerTupleSlot != NULL)
-/* Returns true if doing null-fill on inner relation */
-#define HJ_FILL_INNER(hjstate)	((hjstate)->hj_NullOuterTupleSlot != NULL)
-
 static TupleTableSlot *ExecHashJoinOuterGetTuple(PlanState *outerNode,
 												 HashJoinState *hjstate,
 												 uint32 *hashvalue);
@@ -1655,4 +1640,136 @@ ExecHashJoinInitializeWorker(HashJoinState *state,
 	hashNode->parallel_state = pstate;
 
 	ExecSetExecProcNode(&state->js.ps, ExecParallelHashJoin);
+}
+
+
+
+extern void
+ExecProgramBuildForHashJoin(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	HashJoinState  *hjstate = castNode(HashJoinState, node);
+	HashState  *hashstate = castNode(HashState, innerPlanState(hjstate));
+	HashJoin *hj = (HashJoin *) hjstate->js.ps.plan;
+	EmitForPlanNodeData outerPlanData = {};
+	EmitForPlanNodeData innerPlanData = {};
+	int built_off = --b->varno;
+	int probeslot;
+
+	if (hj->join.jointype != JOIN_INNER)
+	{
+		b->failed = true;
+		return;
+	}
+
+	d->resetnodes = lappend(d->resetnodes, hjstate);
+
+	/*
+	 * Create hashtable / skip over steps building it if already built.
+	 */
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_INIT_HASH;
+		step->d.hash.hstate = hashstate;
+		step->d.hash.hjstate = hjstate;
+		ExexProgramAssignJump(b, step, &step->d.hash.jumpbuilt, built_off);
+	}
+
+	/* retrieve content of hashtable */
+
+	/* get one input tuple */
+	ExecProgramBuildForNode(b, outerPlanState(hashstate), eflags, built_off,
+							&innerPlanData);
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_HASH_TUPLE;
+		step->d.hash.hstate = hashstate;
+		step->d.hash.hjstate = hjstate;
+		step->d.hash.inputslot = innerPlanData.resslot;
+		step->d.hash.jumpnext = innerPlanData.jumpret;
+	}
+
+	/* done building content of hashjoin */
+	/* FIXME: not correct when reentering, because we might be in process of probing */
+	ExecProgramDefineJump(b, built_off, b->program->steps_len);
+
+	ExecProgramBuildForNode(b, outerPlanState(hjstate), eflags, jumpfail,
+							&outerPlanData);
+
+	d->jumpret = b->program->steps_len;
+
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		probeslot = ExecProgramAddSlot(b);
+
+		step->opcode = XO_PROBE_HASH;
+		step->d.hj.state = hjstate;
+		step->d.hj.jumpmiss = outerPlanData.jumpret;
+		step->d.hj.inputslot = outerPlanData.resslot;
+		step->d.hj.probeslot = probeslot;
+
+		b->program->slots[probeslot] = hjstate->hj_HashTupleSlot;
+	}
+
+
+	/* currently executed inside ExecScanHashBucket */
+	if (hjstate->hashclauses && false)
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_JOIN;
+		step->d.qual.jumpfail = d->jumpret;
+		step->d.qual.outerslot = outerPlanData.resslot;
+		step->d.qual.innerslot = probeslot;
+		step->d.qual.qual = hjstate->hashclauses;
+		step->d.qual.econtext = hjstate->js.ps.ps_ExprContext;
+	}
+
+	if (hjstate->js.joinqual)
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_JOIN;
+		step->d.qual.jumpfail = d->jumpret;
+		step->d.qual.outerslot = outerPlanData.resslot;
+		step->d.qual.innerslot = probeslot;
+		step->d.qual.qual = hjstate->js.joinqual;
+		step->d.qual.econtext = hjstate->js.ps.ps_ExprContext;
+	}
+
+	if (hjstate->js.ps.qual)
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_JOIN;
+		step->d.qual.jumpfail = d->jumpret;
+		step->d.qual.outerslot = outerPlanData.resslot;
+		step->d.qual.innerslot = probeslot;
+		step->d.qual.qual = hjstate->js.ps.qual;
+		step->d.qual.econtext = hjstate->js.ps.ps_ExprContext;
+	}
+
+	{
+		ProjectionInfo *project = hjstate->js.ps.ps_ProjInfo;
+		int projslot = ExecProgramAddSlot(b);
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_PROJECT_JOIN;
+		step->d.project.outerslot = outerPlanData.resslot;
+		step->d.project.innerslot = probeslot;
+		step->d.project.project = project;
+		step->d.project.result = projslot;
+
+		b->program->slots[projslot] = project->pi_state.resultslot;
+		d->resslot = projslot;
+	}
 }

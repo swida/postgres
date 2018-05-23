@@ -14,8 +14,10 @@
 #ifndef NODEINDEXONLYSCAN_H
 #define NODEINDEXONLYSCAN_H
 
+
 #include "access/parallel.h"
 #include "nodes/execnodes.h"
+#include "executor/execProgram.h"
 
 extern IndexOnlyScanState *ExecInitIndexOnlyScan(IndexOnlyScan *node, EState *estate, int eflags);
 extern void ExecEndIndexOnlyScan(IndexOnlyScanState *node);
@@ -32,5 +34,10 @@ extern void ExecIndexOnlyScanReInitializeDSM(IndexOnlyScanState *node,
 											 ParallelContext *pcxt);
 extern void ExecIndexOnlyScanInitializeWorker(IndexOnlyScanState *node,
 											  ParallelWorkerContext *pwcxt);
+
+
+extern bool indexonly_getnext(IndexOnlyScanState *node, TupleTableSlot *slot, ScanDirection direction);
+
+extern void ExecProgramBuildForIndexOnlyScan(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d);
 
 #endif							/* NODEINDEXONLYSCAN_H */

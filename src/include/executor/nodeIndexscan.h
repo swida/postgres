@@ -16,6 +16,7 @@
 
 #include "access/genam.h"
 #include "access/parallel.h"
+#include "executor/execProgram.h"
 #include "nodes/execnodes.h"
 
 extern IndexScanState *ExecInitIndexScan(IndexScan *node, EState *estate, int eflags);
@@ -43,5 +44,7 @@ extern void ExecIndexEvalRuntimeKeys(ExprContext *econtext,
 extern bool ExecIndexEvalArrayKeys(ExprContext *econtext,
 								   IndexArrayKeyInfo *arrayKeys, int numArrayKeys);
 extern bool ExecIndexAdvanceArrayKeys(IndexArrayKeyInfo *arrayKeys, int numArrayKeys);
+
+extern void ExecProgramBuildForIndexScan(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d);
 
 #endif							/* NODEINDEXSCAN_H */

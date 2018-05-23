@@ -487,3 +487,63 @@ ExecSortRetrieveInstrumentation(SortState *node)
 	memcpy(si, node->shared_info, size);
 	node->shared_info = si;
 }
+
+void
+ExecProgramBuildForSort(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	SortState  *sortstate = castNode(SortState, node);
+	EmitForPlanNodeData outerPlanData = {};
+	int drain_off;
+	int drainslot;
+
+	drain_off = --b->varno;
+	d->resetnodes = lappend(d->resetnodes, sortstate);
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_INIT_SORT;
+		step->d.sort.state = sortstate;
+	}
+
+	/* get one input tuple */
+	ExecProgramBuildForNode(b, outerPlanState(sortstate), eflags, drain_off,
+							&outerPlanData);
+
+	/* add it to sort  */
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_SORT_TUPLE;
+		step->d.sort.state = sortstate;
+		step->d.sort.inputslot = outerPlanData.resslot;
+		ExexProgramAssignJump(b, step, &step->d.sort.jumpnext, outerPlanData.jumpret);
+	}
+
+	/* once input has been emptied, drain the sort */
+	ExecProgramDefineJump(b, drain_off, b->program->steps_len);
+
+	drainslot = ExecProgramAddSlot(b);
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_SORT;
+		step->d.sort.state = sortstate;
+		ExexProgramAssignJump(b, step, &step->d.sort.jumpempty, jumpfail);
+		step->d.sort.outputslot = drainslot;
+	}
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_DRAIN_SORT;
+		step->d.sort.state = sortstate;
+		ExexProgramAssignJump(b, step, &step->d.sort.jumpempty, jumpfail);
+		step->d.sort.outputslot = drainslot;
+	}
+	b->program->slots[drainslot] = sortstate->ss.ps.ps_ResultTupleSlot;
+
+	d->resslot = drainslot;
+	d->jumpret = b->program->steps_len - 1;
+}

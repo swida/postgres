@@ -2448,6 +2448,8 @@ typedef struct AggState
 										 * ->hash_pergroup */
 	ProjectionInfo *combinedproj;	/* projection machinery */
 	SharedAggInfo *shared_info; /* one entry per worker */
+
+	bool at_boundary;
 } AggState;
 
 /* ----------------

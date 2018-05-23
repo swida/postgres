@@ -300,3 +300,65 @@ ExecSeqScanInitializeWorker(SeqScanState *node,
 	node->ss.ss_currentScanDesc =
 		table_beginscan_parallel(node->ss.ss_currentRelation, pscan);
 }
+
+void
+ExecProgramBuildForSeqScan(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	ExecProgram *p = b->program;
+	SeqScanState *state = (SeqScanState *) node;
+	SeqScan *seqscan = (SeqScan *) state->ss.ps.plan;
+	int continue_at;
+	int seqslot = ExecProgramAddSlot(b);
+
+	d->resetnodes = lappend(d->resetnodes, state);
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+		step->opcode = XO_SEQSCAN_FIRST;
+		step->d.seqscan.state = state;
+		p->slots[seqslot] = state->ss.ss_ScanTupleSlot;
+	}
+
+	/* only execute initialization once */
+	d->jumpret = continue_at = b->program->steps_len;
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_SEQSCAN;
+		step->d.seqscan.state = state;
+		step->d.seqscan.slot = seqslot;
+		ExexProgramAssignJump(b, step, &step->d.seqscan.jumpempty, jumpfail);
+	}
+
+	if (seqscan->scan.plan.qual)
+	{
+		/* consider combining to SEQSCAN_QUAL w/ tight loop */
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_QUAL_SCAN;
+		step->d.qual.jumpfail = continue_at;
+		step->d.qual.scanslot = seqslot;
+		step->d.qual.qual = state->ss.ps.qual;
+		step->d.qual.econtext = state->ss.ps.ps_ExprContext;
+	}
+
+	if (state->ss.ps.ps_ProjInfo)
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+		ProjectionInfo *project = state->ss.ps.ps_ProjInfo;
+		int projslot = ExecProgramAddSlot(b);
+
+		step->opcode = XO_PROJECT_SCAN;
+		step->d.project.scanslot = seqslot;
+		step->d.project.project = project;
+		step->d.project.result = projslot;
+
+		p->slots[projslot] = project->pi_state.resultslot;
+		d->resslot = projslot;
+	}
+	else
+	{
+		d->resslot = seqslot;
+	}
+}

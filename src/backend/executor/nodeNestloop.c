@@ -399,3 +399,127 @@ ExecReScanNestLoop(NestLoopState *node)
 	node->nl_NeedNewOuter = true;
 	node->nl_MatchedOuter = false;
 }
+
+void
+ExecProgramBuildForNestloop(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	NestLoopState *state = castNode(NestLoopState, node);
+	NestLoop *nestloop = (NestLoop *) state->js.ps.plan;
+	EmitForPlanNodeData outerPlanData = {};
+	EmitForPlanNodeData innerPlanData = {};
+	int i;
+	ListCell *lc;
+	int rescan_step;
+
+	if (nestloop->join.jointype != JOIN_INNER)
+	{
+		b->failed = true;
+		return;
+	}
+
+	ExecProgramBuildForNode(b, outerPlanState(state), eflags, jumpfail,
+							&outerPlanData);
+
+	d->resetnodes = outerPlanData.resetnodes;
+
+	if (nestloop->nestParams != NIL)
+	{
+		ExecStep *param_step = NULL;
+		int nparams = list_length(nestloop->nestParams);
+		ListCell *lc;
+		int i;
+
+		param_step = ExecProgramAddStep(b);
+		param_step->opcode = XO_PARAM;
+		param_step->d.param.slot = outerPlanData.resslot;
+		param_step->d.param.nparams = nparams;
+		param_step->d.param.econtext = state->js.ps.ps_ExprContext;
+		param_step->d.param.params = (NestLoopParam *) palloc(sizeof(NestLoopParam) * nparams);
+		param_step->d.param.ps = innerPlanState(state);
+
+		i = 0;
+		foreach(lc, nestloop->nestParams)
+		{
+			param_step->d.param.params[i++] = *(NestLoopParam *) lfirst(lc);
+		}
+	}
+
+	/* reset inner plan */
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		rescan_step = b->program->steps_len - 1;
+
+		step->opcode = XO_RESCAN;
+
+		d->jumpret = outerPlanData.jumpret;
+	}
+
+	ExecProgramBuildForNode(b, innerPlanState(state), eflags,
+							outerPlanData.jumpret,
+							&innerPlanData);
+
+	/* XXX: otherwise assertions below could fail */
+	if (b->failed)
+		return;
+
+	/* update data for reset (only determined in ExecProgramBuildForNode()) */
+	Assert(innerPlanData.resetnodes != NIL);
+	{
+		ExecStep *step = &b->program->steps[rescan_step];
+
+		step->d.rescan.num_nodes = list_length(innerPlanData.resetnodes);
+		Assert(step->d.rescan.num_nodes > 0);
+		step->d.rescan.nodes = palloc(sizeof(PlanState*) *
+											 step->d.rescan.num_nodes);
+		i = 0;
+		foreach(lc, innerPlanData.resetnodes)
+		{
+			step->d.rescan.nodes[i++] = (PlanState *) lfirst(lc);
+		}
+	}
+
+	if (state->js.joinqual)
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_JOIN;
+		step->d.qual.jumpfail = innerPlanData.jumpret;
+		step->d.qual.outerslot = outerPlanData.resslot;
+		step->d.qual.innerslot = innerPlanData.resslot;
+		step->d.qual.qual = state->js.joinqual;
+		step->d.qual.econtext = state->js.ps.ps_ExprContext;
+	}
+
+	if (state->js.ps.qual)
+	{
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_JOIN;
+		step->d.qual.jumpfail = innerPlanData.jumpret;
+		step->d.qual.outerslot = outerPlanData.resslot;
+		step->d.qual.innerslot = innerPlanData.resslot;
+		step->d.qual.qual = state->js.ps.qual;
+		step->d.qual.econtext = state->js.ps.ps_ExprContext;
+	}
+
+	{
+		ProjectionInfo *project = state->js.ps.ps_ProjInfo;
+		int projslot = ExecProgramAddSlot(b);
+		ExecStep *step;
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_PROJECT_JOIN;
+		step->d.project.outerslot = outerPlanData.resslot;
+		step->d.project.innerslot = innerPlanData.resslot;
+		step->d.project.project = project;
+		step->d.project.result = projslot;
+
+		b->program->slots[projslot] = project->pi_state.resultslot;
+		d->resslot = projslot;
+	}
+
+	d->jumpret = innerPlanData.jumpret;
+}

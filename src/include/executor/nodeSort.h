@@ -15,6 +15,7 @@
 #define NODESORT_H
 
 #include "access/parallel.h"
+#include "executor/execProgram.h"
 #include "nodes/execnodes.h"
 
 extern SortState *ExecInitSort(Sort *node, EState *estate, int eflags);
@@ -28,5 +29,7 @@ extern void ExecSortEstimate(SortState *node, ParallelContext *pcxt);
 extern void ExecSortInitializeDSM(SortState *node, ParallelContext *pcxt);
 extern void ExecSortInitializeWorker(SortState *node, ParallelWorkerContext *pwcxt);
 extern void ExecSortRetrieveInstrumentation(SortState *node);
+
+extern void ExecProgramBuildForSort(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d);
 
 #endif							/* NODESORT_H */

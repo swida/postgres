@@ -1728,3 +1728,59 @@ ExecIndexScanInitializeWorker(IndexScanState *node,
 					 node->iss_ScanKeys, node->iss_NumScanKeys,
 					 node->iss_OrderByKeys, node->iss_NumOrderByKeys);
 }
+
+void
+ExecProgramBuildForIndexScan(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	IndexScanState *state = castNode(IndexScanState, node);
+	IndexScan *indexscan = (IndexScan *) state->ss.ps.plan;
+	ExecStep *step;
+	int continue_at;
+	int indexslot = ExecProgramAddSlot(b);
+
+	d->resetnodes = lappend(d->resetnodes, state);
+
+	step = ExecProgramAddStep(b);
+	step->opcode = XO_INDEX_SCAN_FIRST;
+	step->d.indexscan.state = state;
+	b->program->slots[indexslot] = state->ss.ss_ScanTupleSlot;
+
+	/* only execute initialization once */
+	d->jumpret = continue_at = b->program->steps_len;
+
+	step = ExecProgramAddStep(b);
+	step->opcode = XO_INDEX_SCAN;
+	step->d.indexscan.state = state;
+	step->d.indexscan.slot = indexslot;
+	ExexProgramAssignJump(b, step, &step->d.indexscan.jumpempty, jumpfail);
+
+	if (indexscan->scan.plan.qual)
+	{
+		/* consider combining to INDEXSCAN_QUAL w/ tight loop */
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_QUAL_SCAN;
+		step->d.qual.jumpfail = continue_at;
+		step->d.qual.scanslot = indexslot;
+		step->d.qual.qual = state->ss.ps.qual;
+		step->d.qual.econtext = state->ss.ps.ps_ExprContext;
+	}
+
+	if (state->ss.ps.ps_ProjInfo)
+	{
+		ProjectionInfo *project = state->ss.ps.ps_ProjInfo;
+		int projslot = ExecProgramAddSlot(b);
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_PROJECT_SCAN;
+		step->d.project.scanslot = indexslot;
+		step->d.project.project = project;
+		step->d.project.result = projslot;
+
+		b->program->slots[projslot] = project->pi_state.resultslot;
+		d->resslot = projslot;
+	}
+	else
+	{
+		d->resslot = indexslot;
+	}
+}

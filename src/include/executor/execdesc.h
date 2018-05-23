@@ -48,6 +48,8 @@ typedef struct QueryDesc
 	EState	   *estate;			/* executor's query-wide state */
 	PlanState  *planstate;		/* tree of per-plan-node state */
 
+	struct ExecProgram *prog;
+
 	/* This field is set by ExecutorRun */
 	bool		already_executed;	/* true if previously executed */
 

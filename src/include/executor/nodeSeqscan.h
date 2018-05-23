@@ -15,6 +15,7 @@
 #define NODESEQSCAN_H
 
 #include "access/parallel.h"
+#include "executor/execProgram.h"
 #include "nodes/execnodes.h"
 
 extern SeqScanState *ExecInitSeqScan(SeqScan *node, EState *estate, int eflags);
@@ -27,5 +28,7 @@ extern void ExecSeqScanInitializeDSM(SeqScanState *node, ParallelContext *pcxt);
 extern void ExecSeqScanReInitializeDSM(SeqScanState *node, ParallelContext *pcxt);
 extern void ExecSeqScanInitializeWorker(SeqScanState *node,
 										ParallelWorkerContext *pwcxt);
+
+extern void ExecProgramBuildForSeqScan(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d);
 
 #endif							/* NODESEQSCAN_H */

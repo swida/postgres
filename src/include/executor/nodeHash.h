@@ -79,4 +79,6 @@ extern void ExecShutdownHash(HashState *node);
 extern void ExecHashAccumInstrumentation(HashInstrumentation *instrument,
 										 HashJoinTable hashtable);
 
+void ExecHashDoInsert(HashJoinState *hjstate, HashState *hstate, TupleTableSlot *slot);
+
 #endif							/* NODEHASH_H */

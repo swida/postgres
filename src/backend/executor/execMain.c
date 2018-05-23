@@ -50,6 +50,7 @@
 #include "commands/trigger.h"
 #include "executor/execdebug.h"
 #include "executor/nodeSubplan.h"
+#include "executor/execProgram.h"
 #include "foreign/fdwapi.h"
 #include "jit/jit.h"
 #include "mb/pg_wchar.h"
@@ -69,6 +70,9 @@
 #include "utils/snapmgr.h"
 
 
+/* GUCs */
+bool use_linearized_plan;
+
 /* Hooks for plugins to get control in ExecutorStart/Run/Finish/End */
 ExecutorStart_hook_type ExecutorStart_hook = NULL;
 ExecutorRun_hook_type ExecutorRun_hook = NULL;
@@ -83,8 +87,7 @@ static void InitPlan(QueryDesc *queryDesc, int eflags);
 static void CheckValidRowMarkRel(Relation rel, RowMarkType markType);
 static void ExecPostprocessPlan(EState *estate);
 static void ExecEndPlan(PlanState *planstate, EState *estate);
-static void ExecutePlan(EState *estate, PlanState *planstate,
-						bool use_parallel_mode,
+static void ExecutePlan(QueryDesc *desc,
 						CmdType operation,
 						bool sendTuples,
 						uint64 numberTuples,
@@ -362,9 +365,7 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 			elog(ERROR, "can't re-execute query flagged for single execution");
 		queryDesc->already_executed = true;
 
-		ExecutePlan(estate,
-					queryDesc->planstate,
-					queryDesc->plannedstmt->parallelModeNeeded,
+		ExecutePlan(queryDesc,
 					operation,
 					sendTuples,
 					count,
@@ -1009,6 +1010,20 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 
 	queryDesc->tupDesc = tupType;
 	queryDesc->planstate = planstate;
+	queryDesc->prog = NULL;
+
+	if (use_linearized_plan)
+	{
+		queryDesc->prog = ExecBuildProgram(planstate, estate, eflags);
+		if (queryDesc->prog)
+		{
+			StringInfo s = ExecDescribeProgram(queryDesc->prog);
+
+			ereport(LOG, (errmsg("pp:\n%s", s->data),
+						  errhidestmt(true),
+						  errhidecontext(true)));
+		}
+	}
 }
 
 /*
@@ -1622,9 +1637,7 @@ ExecCloseRangeTableRelations(EState *estate)
  * ----------------------------------------------------------------
  */
 static void
-ExecutePlan(EState *estate,
-			PlanState *planstate,
-			bool use_parallel_mode,
+ExecutePlan(QueryDesc *queryDesc,
 			CmdType operation,
 			bool sendTuples,
 			uint64 numberTuples,
@@ -1632,6 +1645,9 @@ ExecutePlan(EState *estate,
 			DestReceiver *dest,
 			bool execute_once)
 {
+	bool use_parallel_mode = queryDesc->plannedstmt->parallelModeNeeded;
+	EState *estate = queryDesc->estate;
+	PlanState *planstate = queryDesc->planstate;
 	TupleTableSlot *slot;
 	uint64		current_tuple_count;
 
@@ -1667,7 +1683,10 @@ ExecutePlan(EState *estate,
 		/*
 		 * Execute the plan and obtain a tuple
 		 */
-		slot = ExecProcNode(planstate);
+		if (queryDesc->prog)
+			slot = ExecExecProgram(queryDesc->prog, estate);
+		else
+			slot = ExecProcNode(planstate);
 
 		/*
 		 * if the tuple is null, then we assume there is nothing more to
@@ -1726,6 +1745,8 @@ ExecutePlan(EState *estate,
 	 */
 	if (!(estate->es_top_eflags & EXEC_FLAG_BACKWARD))
 		ExecShutdownNode(planstate);
+	if (queryDesc->prog)
+		ExecShutdownProgram(queryDesc->prog);
 
 	if (use_parallel_mode)
 		ExitParallelMode();

@@ -557,3 +557,176 @@ ExecReScanLimit(LimitState *node)
 	if (outerPlan->chgParam == NULL)
 		ExecReScan(outerPlan);
 }
+
+void
+ExecComputeLimit(LimitState *node)
+{
+	/*
+	 * First call for this node, so compute limit/offset. (We can't do
+	 * this any earlier, because parameters from upper nodes will not
+	 * be set during ExecInitLimit.)  This also sets position = 0 and
+	 * changes the state to LIMIT_RESCAN.
+	 */
+
+	if (node->lstate == LIMIT_INITIAL)
+	{
+		recompute_limits(node);
+
+		/*
+		 * Check for empty window; if so, treat like empty subplan.
+		 */
+		if (node->count <= 0 && !node->noCount)
+		{
+			node->lstate = LIMIT_EMPTY;
+		}
+	}
+}
+
+/*
+ * Returns true if limit has been reached.
+ */
+bool
+ExecCheckLimit(LimitState *node)
+{
+	/*
+	 * The main logic is a simple state machine.
+	 */
+	switch (node->lstate)
+	{
+		case LIMIT_INITIAL:
+			pg_unreachable();
+			return true;
+
+		case LIMIT_EMPTY:
+		case LIMIT_SUBPLANEOF:
+		case LIMIT_WINDOWEND:
+			return true;
+
+		case LIMIT_RESCAN:
+		case LIMIT_INWINDOW:
+		case LIMIT_WINDOWSTART:
+			return false;
+
+		default:
+			elog(ERROR, "impossible LIMIT state: %d",
+				 (int) node->lstate);
+			return false;
+			break;
+	}
+}
+
+/*
+ * Return true if input tuple should be disregarded.
+ */
+bool
+ExecUpdateLimit(LimitState *node)
+{
+	node->position++;
+
+	/*
+	 * The main logic is a simple state machine.
+	 */
+	switch (node->lstate)
+	{
+		case LIMIT_INITIAL:
+		case LIMIT_EMPTY:
+		case LIMIT_SUBPLANEOF:
+		case LIMIT_WINDOWEND:
+			pg_unreachable();
+			return false;
+
+		case LIMIT_RESCAN:
+			if (!node->noCount &&
+				node->position - node->offset >= node->count)
+			{
+				node->lstate = LIMIT_WINDOWEND;
+				return false;
+			}
+			else if (node->position > node->offset)
+			{
+				node->lstate = LIMIT_INWINDOW;
+				return false;
+			}
+			return true;
+
+		case LIMIT_INWINDOW:
+			/*
+			 * Forwards scan, so check for stepping off end of window. If
+			 * we are at the end of the window, return NULL without
+			 * advancing the subplan or the position variable; but change
+			 * the state machine state to record having done so.
+			 */
+			if (!node->noCount &&
+				node->position - node->offset >= node->count)
+			{
+				node->lstate = LIMIT_WINDOWEND;
+			}
+			return false;
+
+		case LIMIT_WINDOWSTART:
+			pg_unreachable();
+
+			node->lstate = LIMIT_INWINDOW;
+
+			return false;
+
+		default:
+			elog(ERROR, "impossible LIMIT state: %d",
+				 (int) node->lstate);
+			return false;
+			break;
+	}
+}
+
+
+void
+ExecProgramBuildForLimit(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	EmitForPlanNodeData outerPlanData = {};
+	LimitState *limitstate = castNode(LimitState, node);
+	int jump_check;
+	int post_init_off = --b->varno;
+
+	Assert(limitstate->lstate == LIMIT_INITIAL);
+
+	d->resetnodes = lappend(d->resetnodes, limitstate);
+
+	/* first compute how many tuples should be returned */
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_COMPUTE_LIMIT;
+		step->d.limit.state = limitstate;
+	}
+
+	jump_check = b->program->steps_len;
+
+	/* check whether another tuple is relevant */
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_CHECK_LIMIT;
+		step->d.limit.state = limitstate;
+		ExexProgramAssignJump(b, step, &step->d.limit.jumpout, jumpfail);
+		ExexProgramAssignJump(b, step, &step->d.limit.jumpnext, post_init_off);
+		step->d.limit.initialized = false;
+	}
+
+	/* get one input tuple */
+	ExecProgramBuildForNode(b, outerPlanState(limitstate), eflags, jumpfail,
+							&outerPlanData);
+
+	ExecProgramDefineJump(b, post_init_off, outerPlanData.jumpret);
+
+	{
+		ExecStep *step = ExecProgramAddStep(b);
+
+		step->opcode = XO_UPDATE_LIMIT;
+		step->d.limit.state = limitstate;
+		step->d.limit.jumpout = -1;
+		ExexProgramAssignJump(b, step, &step->d.limit.jumpnext, outerPlanData.jumpret);
+	}
+
+	d->jumpret = jump_check;
+	d->resslot = outerPlanData.resslot;
+}

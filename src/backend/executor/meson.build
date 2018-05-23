@@ -66,4 +66,5 @@ backend_sources += files(
   'spi.c',
   'tqueue.c',
   'tstoreReceiver.c',
+  'execProgram.c',
 )

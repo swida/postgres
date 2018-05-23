@@ -3596,3 +3596,37 @@ get_hash_memory_limit(void)
 
 	return (size_t) mem_limit;
 }
+
+void
+ExecHashDoInsert(HashJoinState *hjstate, HashState *hstate, TupleTableSlot *slot)
+{
+	HashJoinTable hashtable = hjstate->hj_HashTable;
+	ExprContext *econtext = hstate->ps.ps_ExprContext;
+	List	   *hashkeys = hstate->hashkeys;
+	uint32		hashvalue;
+
+	/* We have to compute the hash value */
+	econtext->ecxt_innertuple = slot;
+
+	if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
+							 false, hashtable->keepNulls,
+							 &hashvalue))
+	{
+		int			bucketNumber;
+
+		bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
+		if (bucketNumber != INVALID_SKEW_BUCKET_NO)
+		{
+			/* It's a skew tuple, so put it into that hash table */
+			ExecHashSkewTableInsert(hashtable, slot, hashvalue,
+									bucketNumber);
+			hashtable->skewTuples += 1;
+		}
+		else
+		{
+			/* Not subject to skew optimization, so insert normally */
+			ExecHashTableInsert(hashtable, slot, hashvalue);
+		}
+		hashtable->totalTuples += 1;
+	}
+}

@@ -419,7 +419,6 @@ static void lookup_hash_entries(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_direct(AggState *aggstate);
 static void agg_fill_hash_table(AggState *aggstate);
 static bool agg_refill_hash_table(AggState *aggstate);
-static TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
 static TupleTableSlot *agg_retrieve_hash_table_in_memory(AggState *aggstate);
 static void hash_agg_check_limits(AggState *aggstate);
 static void hash_agg_enter_spill_mode(AggState *aggstate);
@@ -438,6 +437,7 @@ static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 								TupleTableSlot *inputslot, uint32 hash);
 static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
 								 int setno);
+//static TupleTableSlot *agg_retrieve_hash_table(AggState *aggstate);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
 static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
 									  AggState *aggstate, EState *estate,
@@ -1566,7 +1566,7 @@ find_hash_columns(AggState *aggstate)
 	Bitmapset  *base_colnos;
 	Bitmapset  *aggregated_colnos;
 	TupleDesc	scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-	List	   *outerTlist = outerPlanState(aggstate)->plan->targetlist;
+	List	   *outerTlist = outerPlan(aggstate->ss.ps.plan)->targetlist;
 	int			numHashes = aggstate->num_hashes;
 	EState	   *estate = aggstate->ss.ps.state;
 	int			j;
@@ -2541,7 +2541,6 @@ static void
 agg_fill_hash_table(AggState *aggstate)
 {
 	TupleTableSlot *outerslot;
-	ExprContext *tmpcontext = aggstate->tmpcontext;
 
 	/*
 	 * Process each outer-plan tuple, and then fetch the next one, until we
@@ -2553,20 +2552,7 @@ agg_fill_hash_table(AggState *aggstate)
 		if (TupIsNull(outerslot))
 			break;
 
-		/* set up for lookup_hash_entries and advance_aggregates */
-		tmpcontext->ecxt_outertuple = outerslot;
-
-		/* Find or build hashtable entries */
-		lookup_hash_entries(aggstate);
-
-		/* Advance the aggregates (or combine functions) */
-		advance_aggregates(aggstate);
-
-		/*
-		 * Reset per-input-tuple context after each tuple, but note that the
-		 * hash lookups do this too
-		 */
-		ResetExprContext(aggstate->tmpcontext);
+		agg_fill_hash_table_onetup(aggstate, outerslot);
 	}
 
 	/* finalize spills, if any */
@@ -2735,6 +2721,30 @@ agg_refill_hash_table(AggState *aggstate)
 
 	return true;
 }
+/*
+ * ExecAgg for hashed case: read input and build hash table
+ */
+void
+agg_fill_hash_table_onetup(AggState *aggstate, TupleTableSlot *slot)
+{
+	ExprContext *tmpcontext = aggstate->tmpcontext;
+
+	/* set up for lookup_hash_entries and advance_aggregates */
+	tmpcontext->ecxt_outertuple = slot;
+
+	/* Find or build hashtable entries */
+	lookup_hash_entries(aggstate);
+
+	/* Advance the aggregates (or combine functions) */
+	advance_aggregates(aggstate);
+
+	/*
+	 * Reset per-input-tuple context after each tuple, but note that the
+	 * hash lookups do this too
+	 */
+	ResetExprContext(aggstate->tmpcontext);
+}
+
 
 /*
  * ExecAgg for hashed case: retrieving groups from hash table
@@ -2743,7 +2753,7 @@ agg_refill_hash_table(AggState *aggstate)
  * previously-spilled tuples. Only returns NULL after all in-memory and
  * spilled tuples are exhausted.
  */
-static TupleTableSlot *
+TupleTableSlot *
 agg_retrieve_hash_table(AggState *aggstate)
 {
 	TupleTableSlot *result = NULL;
@@ -4753,4 +4763,242 @@ ExecAggRetrieveInstrumentation(AggState *node)
 	si = palloc(size);
 	memcpy(si, node->shared_info, size);
 	node->shared_info = si;
+}
+
+static bool
+agg_project_current_group(AggState *aggstate)
+{
+	int			currentSet;
+	AggStatePerAgg peragg = aggstate->peragg;
+	AggStatePerGroup *pergroups = aggstate->pergroups;
+	TupleTableSlot *firstSlot = aggstate->ss.ss_ScanTupleSlot;
+	ExprContext *econtext = aggstate->ss.ps.ps_ExprContext;
+
+	/*
+	 * Clear the per-output-tuple context for each group, as well as
+	 * aggcontext (which contains any pass-by-ref transvalues of the old
+	 * group).  Some aggregate functions store working state in child
+	 * contexts; those now get reset automatically without us needing to
+	 * do anything special.
+	 *
+	 * We use ReScanExprContext not just ResetExprContext because we want
+	 * any registered shutdown callbacks to be called.  That allows
+	 * aggregate functions to ensure they've cleaned up any non-memory
+	 * resources.
+	 */
+	ReScanExprContext(econtext);
+
+	econtext->ecxt_outertuple = firstSlot;
+
+	Assert(aggstate->projected_set >= 0);
+
+	currentSet = aggstate->projected_set;
+
+	prepare_projection_slot(aggstate, firstSlot, currentSet);
+
+	select_current_set(aggstate, currentSet, false);
+
+	finalize_aggregates(aggstate,
+						peragg,
+						pergroups[currentSet]);
+
+	return !TupIsNull(project_aggregates(aggstate));
+}
+
+AggStateBoundaryState
+agg_fill_direct_onetup(AggState *aggstate, TupleTableSlot *slot)
+{
+	Agg		   *node = (Agg *) aggstate->ss.ps.plan;
+	AggStatePerGroup *pergroups = aggstate->pergroups;
+	bool		hasGroupingSets = aggstate->phase->numsets > 0;
+	int			numGroupingSets = Max(aggstate->phase->numsets, 1);
+	int			numReset = numGroupingSets;
+	ExprContext *tmpcontext = aggstate->tmpcontext;
+	TupleTableSlot *firstSlot = aggstate->ss.ss_ScanTupleSlot;
+	AggStateBoundaryState state;
+
+	/* set up for next advance_aggregates call */
+	tmpcontext->ecxt_innertuple = firstSlot;
+	tmpcontext->ecxt_outertuple = slot;
+
+	if (unlikely(TupIsNull(slot)) || unlikely(aggstate->agg_done))
+	{
+		/* no more outer-plan tuples available */
+		if (hasGroupingSets)
+		{
+			aggstate->input_done = true;
+		}
+		else
+		{
+			aggstate->agg_done = true;
+		}
+
+		if (!aggstate->at_boundary)
+		{
+			aggstate->at_boundary = true;
+			/*
+			 * First project current group (using previous representative
+			 * tuple), then use the input tuple to start a new group.
+			 */
+			if (agg_project_current_group(aggstate))
+				return AGGBOUNDARY_REACHED;
+		}
+
+		return AGGBOUNDARY_FINISHED;
+	}
+
+	if (unlikely(aggstate->at_boundary))
+	{
+		initialize_aggregates(aggstate, pergroups, numReset);
+
+		/*
+		 * Store the copied first input tuple in the tuple table slot
+		 * reserved for it.  The tuple will be deleted when it is
+		 * cleared from the slot.
+		 */
+		ExecStoreHeapTuple(ExecCopySlotHeapTuple(slot),
+					   firstSlot,
+					   true);
+
+		aggstate->at_boundary = false;
+
+		state = AGGBOUNDARY_NEXT;
+	}
+	else
+	{
+		state = AGGBOUNDARY_NEXT;
+
+		/*
+		 * If we are grouping, check whether we've crossed a group
+		 * boundary.
+		 */
+		if (node->aggstrategy != AGG_PLAIN)
+		{
+			if (!ExecQual(aggstate->phase->eqfunctions[node->numCols - 1],
+						  tmpcontext))
+			{
+				/*
+				 * First project current group (using previous representative
+				 * tuple), then use the input tuple to start a new group.
+				 */
+				if (agg_project_current_group(aggstate))
+				{
+					ExecMaterializeSlot(aggstate->ss.ps.ps_ProjInfo->pi_state.resultslot);
+					state = AGGBOUNDARY_REACHED;
+				}
+
+				initialize_aggregates(aggstate, pergroups, numReset);
+
+				/*
+				 * Store the copied first input tuple in the tuple table slot
+				 * reserved for it.  The tuple will be deleted when it is
+				 * cleared from the slot.
+				 */
+				ExecStoreHeapTuple(ExecCopySlotHeapTuple(slot),
+							   firstSlot,
+							   true);
+			}
+		}
+	}
+
+	/* Advance the aggregates (or combine functions) */
+	advance_aggregates(aggstate);
+
+	/* Reset per-input-tuple context after each tuple */
+	ResetExprContext(tmpcontext);
+
+	return state;
+}
+
+void
+ExecProgramBuildForAgg(ExecProgramBuild *b, PlanState *node, int eflags, int jumpfail, EmitForPlanNodeData *d)
+{
+	AggState *state = castNode(AggState, node);
+	Agg *agg = (Agg *) state->ss.ps.plan;
+	EmitForPlanNodeData subPlanData = {};
+
+	if (agg->aggstrategy == AGG_MIXED)
+	{
+		b->failed = true;
+		return;
+	}
+
+	d->resetnodes = lappend(d->resetnodes, state);
+
+	if (agg->aggstrategy == AGG_HASHED)
+	{
+		/* add it to hash table */
+		ExecStep *step;
+		int drain_off;
+		int drainslot;
+
+		subPlanData.jumpret = b->program->steps_len - 1;
+		drain_off = --b->varno;
+
+		/* get one input tuple */
+		ExecProgramBuildForNode(b, outerPlanState(state), eflags,
+								drain_off, &subPlanData);
+
+		step = ExecProgramAddStep(b);
+		step->opcode = XO_HASHAGG_TUPLE;
+		step->d.hashagg.state = state;
+		ExexProgramAssignJump(b, step, &step->d.hashagg.jumpnext, subPlanData.jumpret);
+
+		step->d.hashagg.inputslot = subPlanData.resslot;
+
+		/* once input has been emptied, drain the hash table */
+		ExecProgramDefineJump(b, drain_off, b->program->steps_len);
+
+		drainslot = ExecProgramAddSlot(b);
+
+		{
+			ExecStep *xostep = ExecProgramAddStep(b);
+
+			xostep->opcode = XO_DRAIN_HASHAGG;
+			xostep->d.drain_hashagg.state = state;
+			ExexProgramAssignJump(b, xostep, &xostep->d.drain_hashagg.jumpempty, jumpfail);
+			xostep->d.drain_hashagg.outputslot = drainslot;
+			b->program->slots[drainslot] = state->ss.ps.ps_ProjInfo->pi_state.resultslot;
+		}
+
+		d->resslot = drainslot;
+		d->jumpret = b->program->steps_len - 1;
+	}
+	else
+	{
+		int agg_off = --b->varno;
+		int result_off = --b->varno;
+		int resultslot;
+
+		/* get one input tuple */
+		ExecProgramBuildForNode(b, outerPlanState(state), eflags,
+								agg_off, &subPlanData);
+
+		ExecProgramDefineJump(b, agg_off, b->program->steps_len);
+
+		resultslot = ExecProgramAddSlot(b);
+
+		{
+			ExecStep *step = ExecProgramAddStep(b);
+
+			step->opcode = XO_SORTAGG_TUPLE;
+			step->d.sortagg.state = state;
+			ExexProgramAssignJump(b, step, &step->d.sortagg.jumpempty, jumpfail);
+			ExexProgramAssignJump(b, step, &step->d.sortagg.jumpgroup, result_off);
+			ExexProgramAssignJump(b, step, &step->d.sortagg.jumpnext, subPlanData.jumpret);
+
+			step->d.sortagg.inputslot = subPlanData.resslot;
+			step->d.sortagg.outputslot = resultslot;
+		}
+
+		/* once input has been emptied, drain the hash table */
+		ExecProgramDefineJump(b, result_off, b->program->steps_len);
+
+		d->resslot = resultslot;
+		d->jumpret = subPlanData.jumpret;
+		b->program->slots[resultslot] = state->ss.ps.ps_ProjInfo->pi_state.resultslot;
+
+		state->at_boundary = true;
+		state->projected_set = 0;
+	}
 }

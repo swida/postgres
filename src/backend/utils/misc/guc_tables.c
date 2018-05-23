@@ -99,7 +99,7 @@ extern char *default_tablespace;
 extern char *temp_tablespaces;
 extern bool ignore_checksum_failure;
 extern bool ignore_invalid_pages;
-
+extern PGDLLIMPORT bool use_linearized_plan;
 #ifdef TRACE_SYNCSCAN
 extern bool trace_syncscan;
 #endif
@@ -2018,6 +2018,16 @@ struct config_bool ConfigureNamesBool[] =
 		},
 		&event_triggers,
 		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"use_linearized_plan", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Master of magic."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&use_linearized_plan,
+		false,
 		NULL, NULL, NULL
 	},
 

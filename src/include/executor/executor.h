@@ -70,6 +70,7 @@
 #define EXEC_FLAG_SKIP_TRIGGERS		0x0020	/* skip AfterTrigger setup */
 #define EXEC_FLAG_WITH_NO_DATA		0x0040	/* REFRESH ... WITH NO DATA */
 
+extern PGDLLIMPORT bool use_linearized_plan;
 
 /* Hook for plugins to get control in ExecutorStart() */
 typedef void (*ExecutorStart_hook_type) (QueryDesc *queryDesc, int eflags);
@@ -249,6 +250,7 @@ extern void EvalPlanQualEnd(EPQState *epqstate);
 /*
  * functions in execProcnode.c
  */
+extern PlanState *ExecInitNodeTop(Plan *node, EState *estate, int eflags);
 extern PlanState *ExecInitNode(Plan *node, EState *estate, int eflags);
 extern void ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function);
 extern Node *MultiExecProcNode(PlanState *node);
