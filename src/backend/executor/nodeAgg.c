@@ -4856,9 +4856,7 @@ agg_fill_direct_onetup(AggState *aggstate, TupleTableSlot *slot)
 		 * reserved for it.  The tuple will be deleted when it is
 		 * cleared from the slot.
 		 */
-		ExecForceStoreHeapTuple(ExecCopySlotHeapTuple(slot),
-					   firstSlot,
-					   true);
+		ExecCopySlot(firstSlot, slot);
 
 		aggstate->at_boundary = false;
 
@@ -4894,9 +4892,7 @@ agg_fill_direct_onetup(AggState *aggstate, TupleTableSlot *slot)
 				 * reserved for it.  The tuple will be deleted when it is
 				 * cleared from the slot.
 				 */
-				ExecStoreHeapTuple(ExecCopySlotHeapTuple(slot),
-							   firstSlot,
-							   true);
+				ExecCopySlot(firstSlot, slot);
 			}
 		}
 	}
