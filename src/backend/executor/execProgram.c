@@ -536,9 +536,15 @@ eval:
 				PlanState  *outerNode;
 				TupleDesc	tupDesc;
 				Sort	   *plannode = (Sort *) state->ss.ps.plan;
+				int			tuplesortopts = TUPLESORT_NONE;
 
 				outerNode = outerPlanState(state);
 				tupDesc = ExecGetResultType(outerNode);
+
+				if (state->randomAccess)
+					tuplesortopts |= TUPLESORT_RANDOMACCESS;
+				if (state->bounded)
+					tuplesortopts |= TUPLESORT_ALLOWBOUNDED;
 
 				state->tuplesortstate =
 					tuplesort_begin_heap(tupDesc,
@@ -548,7 +554,7 @@ eval:
 										 plannode->collations,
 										 plannode->nullsFirst,
 										 work_mem,
-										 NULL, state->randomAccess);
+										 NULL, tuplesortopts);
 				if (state->bounded)
 					tuplesort_set_bound(state->tuplesortstate, state->bound);
 
