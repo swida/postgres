@@ -3606,7 +3606,7 @@ ExecHashDoInsert(HashJoinState *hjstate, HashState *hstate, TupleTableSlot *slot
 	uint32		hashvalue;
 
 	/* We have to compute the hash value */
-	econtext->ecxt_innertuple = slot;
+	econtext->ecxt_outertuple = slot;
 
 	if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
 							 false, hashtable->keepNulls,
